@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 plt.style.use('ggplot')
 from pilco.controllers import RBFNPolicy
 from pilco.models.pilco import PILCO
+from pilco.cost_function import SaturatingCost
 
 env = gym.make('InvertedPendulum-v2')
 env.reset()
@@ -20,15 +21,20 @@ def rollout(policy, timesteps):
     Y = []
     env.reset()
     x, _, _, _ = env.step(0)
+    x = np.append(x, np.sin(x[2]))
+    x = np.append(x, np.cos(x[2]))
+    x = np.delete(x, 2)
     for t in range(timesteps):
         # env.render()
         u = policy(x)
         # print("Performing action: %f" % u)
-        x_new, _, done, _ = env.step(u)
-        # print(x_new)
+        x_new, reward, done, _ = env.step(u)
         if done:
             print("Episode finished after {} timesteps".format(t + 1))
             break
+        x_new = np.append(x_new, np.sin(x_new[2]))
+        x_new = np.append(x_new, np.cos(x_new[2]))
+        x_new = np.delete(x_new, 2)
         X.append(np.hstack((x, u)))
         Y.append(x_new - x)
         x = x_new
@@ -46,6 +52,18 @@ def random_policy(x):
 def pilco_policy(x):
     return pilco.compute_action(x)
 
+
+def cost(a, l):
+    # TODO: make j_target dynamic (it is -1 because of choice of a and l)
+    j_target = np.array([0, 0, -1])
+    # j = np.array([x[0], np.sin(x[2]), np.cos(x[2])])
+    C = np.array([[1., l, 0.0], [0., 0., l]])
+    iT = a ** (-2) * np.dot(C.T, C)
+    return j_target, iT
+
+# def j(x):
+#     return np.array([x[0, 0], np.sin(x[0, 2]), np.cos(x[0, 2])])
+
 X, Y = rollout(policy=random_policy, timesteps=40)
 for i in range(1, 3):
     X_, Y_ = rollout(policy=random_policy, timesteps=40)
@@ -56,11 +74,21 @@ state_dim = Y.shape[1]
 control_dim = X.shape[1] - state_dim
 policy = RBFNPolicy(state_dim, control_dim=control_dim, num_basis_fun=50, max_action=env.action_space.high[0])
 
-pilco = PILCO(X, Y, policy=policy, horizon=40)
+a = 0.25
+l = 0.6
+j_target, iT = cost(0.25, 0.6)
+idxs = [0, 3, 4]
+cost = SaturatingCost(j_target, iT, idxs)
 
-pilco.optimize()
+pilco = PILCO(X, Y, policy=policy, cost=cost, horizon=40)
 
-rollout(policy=pilco_policy, timesteps=100)
+pilco.optimize1()
+
+# pilco.predict()
+
+
+
+# rollout(policy=pilco_policy, timesteps=100)
 
 
 # print(Y)
