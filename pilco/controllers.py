@@ -1,8 +1,6 @@
 import numpy as np
 import tensorflow as tf
-import gpflow
-from pilco.models.mgpr import MGPR
-float_type = gpflow.settings.dtypes.float_type
+import GPy
 
 
 class LinearPolicy:
@@ -28,16 +26,20 @@ class LinearPolicy:
         S = np.dot(self.Phi, s).dot(self.Phi.T)
         return M, S
 
-class RBFN(gpflow.Parameterized):
-    def __init__(self, X, Y, kern):
-        gpflow.Parameterized.__init__(self)
-        self.X = gpflow.Param(X)
-        self.Y = gpflow.Param(Y)
+
+class PseudGPR(GPy.Parameterized):
+
+    def __init__(self, X, Y, kern, name="PseudoGPR"):
+        GPy.Parameterized.__init__(self, name=name)
+        self.X = GPy.Param("input", X)
+        # self.add_parameter(self.X)
+        self.Y = GPy.Param("target", Y)
+        # self.add_parameter(self.Y)
         self.kern = kern
-        self.likelihood = gpflow.likelihoods.Gaussian()
+        self.likelihood = GPy.likelihoods.Gaussian()
 
 
-class RBFNPolicy(MGPR):
+class RBFNPolicy:
     """
     Radial Basis Function Network Preliminary Policy
     See Deisenroth et al 2015: Gaussian Processes for Data-Efficient Learning in Robotics and Control
@@ -51,23 +53,30 @@ class RBFNPolicy(MGPR):
         :param num_basis_fun: number of radial basis functions (no. hidden neurons)
         :param sigma:
         """
-        MGPR.__init__(self,
-                      np.random.randn(num_basis_fun, state_dim),
-                      0.1 * np.random.randn(num_basis_fun, control_dim)
-                      )
-        # self.num_basis_fun = num_basis_fun
-        # self.max_action = max_action
+        self.state_dim = state_dim
+        self.control_dim = control_dim
+        self.num_basis_fun = num_basis_fun
+        self.max_action = max_action
+
+        self.models = []
+        self.create_models(np.random.randn(num_basis_fun, state_dim),
+                           0.1 * np.random.randn(num_basis_fun, control_dim)
+                           )
+
         for model in self.models:
             model.kern.variance = 1.0
             model.kern.variance.trainable = False
             self.max_action = max_action
 
-
     def create_models(self, X, Y):
-        self.models = gpflow.params.ParamList([])
-        for i in range(self.num_outputs):
-            kern = gpflow.kernels.RBF(input_dim=X.shape[1], ARD=True)
-            model = RBFN(X, Y, kern)
+        for i in range(self.control_dim):
+            kernel = GPy.kern.RBF(input_dim=self.state_dim, ARD=1)
+            model = PseudGPR(X, Y[:, i:i + 1], kernel)
+            # model = GPy.models.GPRegression(X, Y[:, i:i+1], kernel)
+            # model.likelihood = GPy.likelihoods.Gaussian()
+            # model.X = GPy.Param(X)
+            # model.Y = GPy.Param(Y)
+            # model._add_parameter_name()
             self.models.append(model)
 
     def compute_action(self, m_x, s_x):
@@ -77,9 +86,69 @@ class RBFNPolicy(MGPR):
         :param s_x: variance of the state; state_dim x state_dim
         :return: mean (M) and variance (S) of action
         """
-        M, S = self.predict(m_x, s_x)
-        return M, S
+        actions = []
+        # print(m_x)
+        # print(m_x.shape)
+        # print(m_x[np.newaxis].shape)
+        for model in self.models:
+            # m_u, s_u = model.predict(m_x)
+            m_u, s_u = self.univariate_predict(m_x, s_x, model)
+            actions.append([m_u, s_u])
+        # M, S = self.predict(m_x, s_x)
+        # TODO: squash using sin function
+        return actions
 
+    def calc_qi(self, m, x_i, alpha, inv, det):
+        inp = x_i - m
+        exp = -0.5 * np.dot(np.dot(inp, inv), inp.T)
+        q = alpha * det ** (-0.5) * np.exp(exp)
+        return q
+
+    def calc_Qij(self, x_i, x_j, m, s, model, det, iLambda):
+        frac = np.dot(model.kern.K(x_i, m), model.kern.K(x_j, m)) / np.sqrt(det)
+        z_ij = 0.5 * (x_i + x_j)
+        inp = z_ij - m
+        exp1 = np.linalg.inv(s + 0.5 * iLambda)
+        exp = np.dot(np.dot(np.dot(np.dot(inp, exp1), s), iLambda), inp.T)
+        return frac * np.exp(exp)
+
+    def univariate_predict(self, m, s, model):
+        """
+
+        :param m: mean of the input; (state_dim+control_dim x 1)
+        :param s:
+        :param model:
+        :return:
+        """
+        # TODO - Check I have used the correct variance (it should be signal variance)
+        alpha = model.kern.variance[0]  # signal variance
+        iLambda = np.diag(model.kern.lengthscale)
+        det = np.linalg.det(np.dot(s, iLambda) + np.eye(s.shape[0]))
+        inv = np.linalg.inv(s + iLambda)
+        q = np.empty(model.X.shape[0])
+        for i, x in enumerate(model.X):
+            q_i = self.calc_qi(m, x, alpha, inv, det)
+            q[i] = q_i
+
+        # TODO - Correct Cholesky Dec implementation
+        eye = np.eye(model.X.shape[0])
+        K = model.kern.K(model.X)
+        L = np.linalg.cholesky(K + model.likelihood.variance * eye)
+        iK = np.linalg.solve(L, eye)
+        beta = np.linalg.solve(L, model.Y)
+
+        m_star = np.dot(beta.T, q)
+
+        Q = np.empty((model.X.shape[0], model.X.shape[0]))
+        det = np.linalg.det(2 * np.dot(s, iLambda) + np.eye(s.shape[0]))
+        for i, x_i in enumerate(model.X):
+            for j, x_j in enumerate(model.X):
+                Q_ij = self.calc_Qij(x_i[np.newaxis], x_j[np.newaxis], m, s, model, det, iLambda)
+                Q[i, j] = Q_ij
+
+        s_star = alpha - np.trace(np.dot(iK, Q)) + np.dot(np.dot(beta.T, Q), beta) - m_star ** 2
+
+        return m_star, s_star
 
     # def _kernel_function(self, center, data_input):
     #     """
@@ -215,32 +284,32 @@ class RBFNPolicy(MGPR):
     #     q = np.exp(-0.5 * (x - m).T * np.linalg.inv(v + lengthscales) * (x - m))
     #     return np.dot(self.weights, q)
 
-    def squash(self, m, s):
-        """
-
-        :param m: mean of control input
-        :param s: variance of control input
-        :return: mean (M), variance (S) and input-output covariance of squashed control input
-        """
-        # self.max_action
-
-        k = tf.shape(m)[1]
-        max_action = self.max_action
-        if max_action is None:
-            max_action = tf.ones((1, k), dtype=float_type)  # squashes in [-1,1] by default
-        else:
-            max_action = max_action * tf.ones((1, k), dtype=float_type)
-
-        M = max_action * tf.exp(-tf.diag_part(s) / 2) * tf.sin(m)
-
-        lq = -(tf.diag_part(s)[:, None] + tf.diag_part(s)[None, :]) / 2
-        q = tf.exp(lq)
-        S = (tf.exp(lq + s) - q) * tf.cos(tf.transpose(m) - m) \
-            - (tf.exp(lq - s) - q) * tf.cos(tf.transpose(m) + m)
-        S = max_action * tf.transpose(max_action) * S / 2
-
-        C = max_action * tf.diag(tf.exp(-tf.diag_part(s) / 2) * tf.cos(m))
-        return M, S, tf.reshape(C, shape=[k, k])
+    # def squash(self, m, s):
+    #     """
+    #
+    #     :param m: mean of control input
+    #     :param s: variance of control input
+    #     :return: mean (M), variance (S) and input-output covariance of squashed control input
+    #     """
+    #     # self.max_action
+    #
+    #     k = tf.shape(m)[1]
+    #     max_action = self.max_action
+    #     if max_action is None:
+    #         max_action = tf.ones((1, k), dtype=float_type)  # squashes in [-1,1] by default
+    #     else:
+    #         max_action = max_action * tf.ones((1, k), dtype=float_type)
+    #
+    #     M = max_action * tf.exp(-tf.diag_part(s) / 2) * tf.sin(m)
+    #
+    #     lq = -(tf.diag_part(s)[:, None] + tf.diag_part(s)[None, :]) / 2
+    #     q = tf.exp(lq)
+    #     S = (tf.exp(lq + s) - q) * tf.cos(tf.transpose(m) - m) \
+    #         - (tf.exp(lq - s) - q) * tf.cos(tf.transpose(m) + m)
+    #     S = max_action * tf.transpose(max_action) * S / 2
+    #
+    #     C = max_action * tf.diag(tf.exp(-tf.diag_part(s) / 2) * tf.cos(m))
+    #     return M, S, tf.reshape(C, shape=[k, k])
 
 
     # def compute_action(self, m, s):
