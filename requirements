@@ -1,0 +1,11 @@
+numpy
+matplotlib
+IPython
+time
+GPy
+gpflow
+decimal
+tensorflow
+gym
+scipy
+abc
