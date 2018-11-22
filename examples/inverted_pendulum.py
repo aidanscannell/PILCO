@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 plt.style.use('ggplot')
 from pilco.controllers import RBFNPolicy
 from pilco.models.pilco import PILCO
-from pilco.cost_function import SaturatingCost
+from pilco.cost import SaturatingCost
 
 env = gym.make('InvertedPendulum-v2')
 env.reset()
@@ -58,6 +58,8 @@ def cost(a, l):
     j_target = np.array([0, 0, -1])
     # j = np.array([x[0], np.sin(x[2]), np.cos(x[2])])
     C = np.array([[1., l, 0.0], [0., 0., l]])
+    print("C")
+    print(C.shape)
     iT = a ** (-2) * np.dot(C.T, C)
     return j_target, iT
 

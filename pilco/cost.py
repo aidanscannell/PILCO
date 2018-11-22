@@ -24,8 +24,14 @@ class SaturatingCost(Cost):
     def first_moment(self, m_x, s_x):
         diff = m_x[:, self.idxs] - self.x_target
         det = np.eye(s_x.shape[0]) + np.dot(s_x, self.iT)
+        print("det")
+        print(np.linalg.det(det))
+        print("s_x")
+        print(s_x)
+        # print("iT")
+        # print(self.iT)
         S1 = np.dot(self.iT, np.linalg.inv(det))
-        E = np.linalg.det(det) ** (-0.5) * np.exp(-0.5 * np.dot(np.dot(diff, S1), diff.T))
+        E = 1 - np.linalg.det(det) ** (-0.5) * np.exp(-0.5 * np.dot(np.dot(diff, S1), diff.T))
         return E, S1
 
     def second_moment(self, m_x, s_x):
