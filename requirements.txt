@@ -23,7 +23,7 @@ GPy==1.9.2
 grpcio==1.13.0
 -e git+https://github.com/openai/gym.git@293eea787a662f501b0e4aab512d3769e830ece2#egg=gym
 h5py==2.8.0
-html5lib==0.9999999
+html5lib==0.99999999
 idna==2.6
 imageio==2.4.1
 imagesize==1.1.0
